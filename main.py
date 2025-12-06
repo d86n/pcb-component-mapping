@@ -1,8 +1,8 @@
 import cv2
 import numpy as np
 
-def process_arduino_v4(image_path):
-    print(f"Đang xử lý ảnh V4: {image_path}")
+def process_arduino_v5_final(image_path):
+    print(f"Đang xử lý ảnh V5 (Final): {image_path}")
     img = cv2.imread(image_path)
     if img is None: return
 
@@ -10,7 +10,7 @@ def process_arduino_v4(image_path):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # --- BƯỚC 1: TÁCH MẠCH (GIỮ NGUYÊN NHƯ V3) ---
+    # --- BƯỚC 1: TÁCH MẠCH (GIỮ NGUYÊN) ---
     lower_teal = np.array([35, 50, 50])   
     upper_teal = np.array([100, 255, 255]) 
     mask_board = cv2.inRange(hsv, lower_teal, upper_teal)
@@ -36,81 +36,89 @@ def process_arduino_v4(image_path):
     count = 0
     font = cv2.FONT_HERSHEY_SIMPLEX
     
-    print(f"--- BẮT ĐẦU PHÂN LOẠI V4 ---")
+    print(f"--- BẮT ĐẦU PHÂN LOẠI V5 ---")
     
     for cnt in contours:
         area = cv2.contourArea(cnt)
         x, y, w, h = cv2.boundingRect(cnt)
+        perimeter = cv2.arcLength(cnt, True)
         
-        # 1. Lọc rác siêu nhỏ (bụi)
+        # 1. Lọc rác siêu nhỏ
         if area < 30: continue
-        # Lọc bóng quá to
         if area > (img.shape[0]*img.shape[1] * 0.9): continue
 
-        # --- PHÂN TÍCH ĐỘ SÁNG (CHÌA KHÓA CỦA V4) ---
+        # --- TÍNH TOÁN CHỈ SỐ ---
         mask_curr = np.zeros_like(gray)
         cv2.drawContours(mask_curr, [cnt], -1, 255, -1)
         mean_intensity = cv2.mean(gray, mask=mask_curr)[0]
         
-        # --- BỘ LỌC 1: DIỆT LOGO & TEXT (SƠN TRẮNG) ---
-        # Sơn in lụa (Arduino, Digital, PWM, ~) thường rất sáng (> 190)
-        # Linh kiện sáng nhất là thạch anh/USB cũng chỉ tầm 150-180
-        # -> Ngưỡng cắt: 185. Cái gì sáng hơn 185 là SƠN -> XÓA.
-        if mean_intensity > 185: 
-            continue 
-
-        # --- BỘ LỌC 2: DIỆT CHÂN CẮM ĐỰC & NHIỄU KIM LOẠI ---
-        # Chân cắm đực: Nhỏ (area < 200) + Sáng (màu kim loại > 120)
-        # Tại sao phải chặn? Vì chúng sáng hơn chip đen nhưng tối hơn sơn trắng.
-        # Chip đen: < 110. Tụ/Thạch anh: To > 500.
-        # -> Cái gì BÉ (< 200) mà lại KHÔNG ĐEN (> 120) -> XÓA.
-        if area < 200 and mean_intensity > 120:
-            continue
-
-        # --- BỘ LỌC 3: HÌNH DÁNG ---
-        # Lọc các nét gạch mảnh (ví dụ viền bảng, vạch kẻ)
-        if w < 12 or h < 12: continue
-        
-        # Tính các chỉ số
         hull = cv2.convexHull(cnt)
         hull_area = cv2.contourArea(hull)
         if hull_area == 0: continue
         solidity = float(area) / hull_area 
         aspect_ratio = float(w) / h
         
-        # --- QUYẾT ĐỊNH CUỐI CÙNG (WHITELIST) ---
-        
-        # Nhóm 1: Linh kiện ĐEN (Chip, Trở, Header nhựa)
-        # Đặc điểm: Tối màu (< 115) + Hình khối rõ ràng
-        is_black_component = (mean_intensity < 115 and area > 40 and solidity > 0.6)
-        
-        # Nhóm 2: Linh kiện BẠC/XÁM (Tụ nhôm, Thạch anh, USB)
-        # Đặc điểm: Màu trung tính (115-185) + KÍCH THƯỚC PHẢI LỚN (> 300)
-        # Lưu ý: Phải đủ to để không bị nhầm với chân hàn/chân cắm đực
-        is_silver_component = (115 <= mean_intensity <= 185 and area > 300 and solidity > 0.6)
-        
-        # Nhóm 3: Linh kiện DÀI/TO bất thường (Header 8 chân, Jack nguồn)
-        is_large_structure = (area > 800 and mean_intensity < 180)
+        if perimeter == 0: continue
+        circularity = 4 * np.pi * (area / (perimeter * perimeter))
 
-        if is_black_component or is_silver_component or is_large_structure:
-            # Check phụ: Loại bỏ các thanh quá mảnh (dòng kẻ)
-            if aspect_ratio > 5.0: continue
+        # ==========================================================
+        #                 BỘ LỌC THÉP (NEGATIVE LIST)
+        # ==========================================================
+
+        # 1. DIỆT SƠN TRẮNG (Logo, Text) - Đã OK ở V4
+        if mean_intensity > 190: continue
+
+        # 2. DIỆT CHÂN CẮM ĐỰC & CHÂN HÀN (FIX MỚI)
+        # Logic: Nếu nhỏ (< 350) thì BẮT BUỘC phải ĐEN THUI (< 100).
+        # Chân cắm đực là kim loại nên sáng (> 110) -> Xóa.
+        # Con trở/chip bé là màu đen (< 80) -> Giữ.
+        if area < 350 and mean_intensity > 100:
+            continue
+
+        # 3. DIỆT LỖ BẮT ỐC (FIX MỚI)
+        # Logic: Tròn (> 0.78) VÀ Khá sáng (> 130) -> Xóa
+        # Tụ CS47 (tròn) có chữ in đen và bề mặt nhôm xám nên intensity thường thấp hơn 130 hoặc circularity thấp hơn do chân đế vuông.
+        if circularity > 0.78 and mean_intensity > 130:
+            continue
             
+        # 4. DIỆT DÒNG KẺ MẢNH
+        if w < 10 or h < 10: continue
+        if aspect_ratio > 5.0: continue
+
+        # ==========================================================
+        #                 DANH SÁCH CHẤP NHẬN (WHITELIST)
+        # ==========================================================
+        
+        # Điều kiện cơ bản: Phải là khối đặc
+        if solidity < 0.6: continue
+
+        # Nhóm 1: Linh kiện ĐEN (Chip, Trở, Diode, Header base)
+        is_black = (mean_intensity < 100)
+        
+        # Nhóm 2: Linh kiện TRUNG TÍNH (Tụ nâu, Tụ nhôm, Thạch anh)
+        # Phải đủ LỚN (> 350) để không bị nhầm với chân hàn
+        is_mid_tone = (100 <= mean_intensity <= 190 and area > 350)
+        
+        # Nhóm 3: Linh kiện LỚN bất thường (Cổng USB, Jack nguồn)
+        is_huge = (area > 800)
+
+        if is_black or is_mid_tone or is_huge:
             count += 1
             
             # Vẽ kết quả
             cv2.rectangle(original, (x, y), (x+w, y+h), (0, 255, 0), 2)
             cv2.circle(original, (x + w//2, y + h//2), 2, (0, 0, 255), -1)
             
-            # Debug: In giá trị độ sáng lên ảnh để bạn kiểm tra nếu sai
-            # cv2.putText(original, f"{int(mean_intensity)}", (x, y-5), font, 0.4, (0, 255, 255), 1)
+            # Debug: In thông số để kiểm tra nếu sai
+            # text_debug = f"I:{int(mean_intensity)} A:{int(area)}"
+            # cv2.putText(original, text_debug, (x, y-5), font, 0.3, (0, 255, 255), 1)
 
     print(f"Tổng số linh kiện phát hiện: {count}")
     
-    cv2.imshow("Final Result V4 - Strict Filter", original)
+    cv2.imshow("Final Result V5 - Clean", original)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-# Chạy với ảnh của bạn
-img_path = "img/Arduino Uno Rev3 SMD.jpg" 
-process_arduino_v4(img_path)
+# Chạy code
+img_path = "img/Arduino Uno Rev3 SMD.jpg"
+process_arduino_v5_final(img_path)
