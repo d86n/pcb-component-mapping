@@ -1,8 +1,8 @@
 import cv2
 import numpy as np
 
-def process_arduino_v9_hybrid(image_path):
-    print(f"Đang xử lý V9 (Hybrid V5 + V8): {image_path}")
+def process_arduino_v13_fixed(image_path):
+    print(f"Đang xử lý V13 (V9 Base + Rescue Small Chips): {image_path}")
     img = cv2.imread(image_path)
     if img is None: return
 
@@ -10,7 +10,7 @@ def process_arduino_v9_hybrid(image_path):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # --- BƯỚC 1: TÁCH MẠCH (GIỮ NGUYÊN V5) ---
+    # --- BƯỚC 1: TÁCH MẠCH (GIỮ NGUYÊN V9) ---
     lower_teal = np.array([35, 50, 50])   
     upper_teal = np.array([100, 255, 255]) 
     mask_board = cv2.inRange(hsv, lower_teal, upper_teal)
@@ -25,7 +25,7 @@ def process_arduino_v9_hybrid(image_path):
     mask_roi = np.zeros_like(mask_board)
     cv2.drawContours(mask_roi, [c_board], -1, 255, -1)
 
-    # --- BƯỚC 2: TÌM ỨNG VIÊN (GIỮ NGUYÊN V5) ---
+    # --- BƯỚC 2: TÌM ỨNG VIÊN (GIỮ NGUYÊN V9) ---
     mask_components = cv2.bitwise_not(mask_board)
     mask_components = cv2.bitwise_and(mask_components, mask_components, mask=mask_roi)
     mask_components = cv2.morphologyEx(mask_components, cv2.MORPH_OPEN, kernel, iterations=1)
@@ -33,7 +33,6 @@ def process_arduino_v9_hybrid(image_path):
     contours, _ = cv2.findContours(mask_components, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     count = 0
-    font = cv2.FONT_HERSHEY_SIMPLEX
     
     print(f"--- BẮT ĐẦU SÀNG LỌC ---")
     
@@ -42,11 +41,11 @@ def process_arduino_v9_hybrid(image_path):
         x, y, w, h = cv2.boundingRect(cnt)
         perimeter = cv2.arcLength(cnt, True)
         
-        # 1. Lọc rác siêu nhỏ (Logic V5)
-        if area < 30: continue
+        # 1. Hạ ngưỡng diện tích xuống 20 để bắt chip tí hon
+        if area < 20: continue
         if area > (img.shape[0]*img.shape[1] * 0.9): continue
 
-        # Tính toán chỉ số cơ bản
+        # Tính toán chỉ số
         mask_curr = np.zeros_like(gray)
         cv2.drawContours(mask_curr, [cnt], -1, 255, -1)
         mean_intensity = cv2.mean(gray, mask=mask_curr)[0]
@@ -61,73 +60,76 @@ def process_arduino_v9_hybrid(image_path):
         circularity = 4 * np.pi * (area / (perimeter * perimeter))
 
         # ==========================================================
-        #                 BỘ LỌC CƠ BẢN CỦA V5 (LOẠI BỎ RÁC)
+        #           CẤU HÌNH "GIẤY THÔNG HÀNH" (RESCUE)
+        # ==========================================================
+        # Chip nhỏ có đặc điểm:
+        # 1. Nhỏ (Area < 450)
+        # 2. RẤT VUÔNG VỨC (Solidity > 0.8) -> Đây là chìa khóa!
+        # (Chân hàn/kim loại thường méo mó, solidity thấp ~0.6-0.7)
+        
+        is_rectangular_chip = (solidity > 0.82) 
+
+        # ==========================================================
+        #                 BỘ LỌC RÁC (V9 LOGIC)
         # ==========================================================
 
         # 1. DIỆT SƠN TRẮNG (Logo, Text)
-        if mean_intensity > 190: continue
+        if mean_intensity > 195: continue
 
         # 2. DIỆT CHÂN CẮM ĐỰC & CHÂN HÀN
-        # (Nhỏ < 350 VÀ Sáng > 100 -> Xóa)
-        if area < 350 and mean_intensity > 100:
-            continue
+        # Logic cũ: Nhỏ (< 350) + Sáng (> 100) -> Xóa
+        # Logic MỚI: Chỉ xóa nếu nó KHÔNG PHẢI là chip vuông vức
+        if not is_rectangular_chip:
+            if area < 350 and mean_intensity > 100:
+                continue
 
-        # 3. DIỆT LỖ BẮT ỐC (Tròn & Sáng)
+        # 3. DIỆT LỖ BẮT ỐC
         if circularity > 0.78 and mean_intensity > 130:
             continue
             
-        # 4. DIỆT DÒNG KẺ MẢNH / LOGO DẸT
-        if w < 10 or h < 10: continue
+        # 4. DIỆT DÒNG KẺ MẢNH
+        if w < 5 or h < 5: continue
         if aspect_ratio > 5.0: continue
-        if solidity < 0.6: continue
+        
+        # Chip thì phải đặc, nếu quá loãng (< 0.5) thì là rác
+        if solidity < 0.5: continue
 
         # ==========================================================
-        #           MODULE ĐẶC BIỆT: TÍCH HỢP V8 (X-RAY CHECK)
+        #           MODULE X-RAY (Soi chân ICSP Header)
         # ==========================================================
-        # Chỉ áp dụng cho các khối MÀU ĐEN (Candidate for Chip or Header)
-        # Intensity < 105 nghĩa là nó có thể là Chip hoặc Header ICSP
         
         is_black_object = (mean_intensity < 105)
         
-        if is_black_object:
-            # Cắt vùng ảnh con để soi
+        # [FIX]: Chỉ soi chân nếu vật thể ĐỦ TO (> 500)
+        # Việc này ngăn không cho nó soi 4 con chip nhỏ (vì chip nhỏ cũng đen)
+        # Nếu soi chip nhỏ, chữ trên lưng chip sẽ bị tính là chân -> Chip bị xóa oan.
+        
+        if is_black_object and area > 500:
             roi = gray[y:y+h, x:x+w]
-            
-            # Tìm các đốm sáng bên trong (Chân kim loại)
-            # Chân kim loại sáng > 115 trên nền đen
             _, mask_pins = cv2.threshold(roi, 115, 255, cv2.THRESH_BINARY)
-            
-            # Đếm số lượng đốm sáng tách biệt
             cnts_pins, _ = cv2.findContours(mask_pins, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
             valid_pins = 0
             for p in cnts_pins:
-                # Chỉ đếm đốm sáng có kích thước > 5px (để tránh nhiễu/chữ)
                 if cv2.contourArea(p) > 5:
                     valid_pins += 1
             
-            # LUẬT V8: Nếu có >= 3 chân kim loại bên trong -> Là Header ICSP -> XÓA
+            # ICSP Header có 6 chân -> Xóa
             if valid_pins >= 3:
-                # print(f"Đã diệt ICSP tại {x},{y} với {valid_pins} chân")
                 continue
 
         # ==========================================================
-        #                 QUYẾT ĐỊNH CUỐI CÙNG (WHITELIST V5)
+        #                 QUYẾT ĐỊNH CUỐI CÙNG
         # ==========================================================
         
-        # Nếu đã qua được tất cả các cửa ải trên, ta phân loại lần cuối để chắc ăn
-        
-        # Nhóm 1: Linh kiện ĐEN (Chip, Trở)
-        is_black = (mean_intensity < 105)
-        
-        # Nhóm 2: Linh kiện TRUNG TÍNH (Tụ nhôm, Thạch anh)
-        # Phải đủ LỚN (> 350) 
-        is_mid_tone = (105 <= mean_intensity <= 190 and area > 350)
-        
-        # Nhóm 3: Linh kiện LỚN bất thường (Cổng USB, Jack nguồn)
+        # Whitelist
+        is_black = (mean_intensity < 110)
+        is_mid_tone = (110 <= mean_intensity <= 195 and area > 350)
         is_huge = (area > 800)
+        
+        # [QUAN TRỌNG] Thêm điều kiện nhận chip nhỏ
+        is_rescued_chip = (is_rectangular_chip and area > 20 and area < 500)
 
-        if is_black or is_mid_tone or is_huge:
+        if is_black or is_mid_tone or is_huge or is_rescued_chip:
             count += 1
             
             # Vẽ kết quả
@@ -136,10 +138,9 @@ def process_arduino_v9_hybrid(image_path):
 
     print(f"Tổng số linh kiện phát hiện: {count}")
     
-    cv2.imshow("Result V9 - Hybrid (Best of V5 & V8)", original)
+    cv2.imshow("Result V13 - V9 Fixed", original)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-# Chạy code
 img_path = "img/Arduino Uno Rev3 SMD.jpg"
-process_arduino_v9_hybrid(img_path)
+process_arduino_v13_fixed(img_path)
